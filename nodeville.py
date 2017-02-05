@@ -18,19 +18,20 @@ def main():
 	n3 = c.node('n3')
 	gnd = GndNode()
 
-	V1 = c.add(VoltSource(n1, gnd, 10.0))
+	V1 = c.add(VoltSource(n1, gnd, 1.5))
 
-	R1 = c.add(Resistor(n1, n2, 100))
-	R2 = c.add(Resistor(n2, n3, 100))
-	R3 = c.add(Resistor(n3, gnd, 100))
+	L1 = c.add(Inductor(n1, n2, 10e-6))
 
-	C1 = c.add(Capacitor(n1, gnd, 1e-9))
-	C2 = c.add(Capacitor(n2, gnd, 1e-9))
-	C3 = c.add(Capacitor(n3, gnd, 1e-9))
+	R1 = c.add(Resistor(n2, n3, 600))
+	R2 = c.add(Resistor(n3, gnd, 600))
 
 	D1 = c.add(Diode(n3, gnd))
 
-	c.run(1e-6)
+	C1 = c.add(Capacitor(n1, gnd, 10e-12))
+	C2 = c.add(Capacitor(n2, gnd, 1e-9))
+	C3 = c.add(Capacitor(n3, gnd, 10e-12))
+
+	c.run(2e-6)
 	c.plot(c.nodes)
 	# c.plot_step()
 	# c.plot_it()
@@ -292,7 +293,7 @@ class Inductor(TwoTerm):
 		super(Inductor, self).__init__(p,n)
 
 	def calc_curr(self, dt):
-		return self.iPrev + (1.0/self.ind)*(self.calc_volt(dt)-self.vPrev)*dt
+		return self.iPrev + (1.0/self.ind)*self.calc_volt(dt)*dt
 
 class VoltSource(TwoTerm):
 	def __init__(self, p, n, volt=1.0, res=1):
