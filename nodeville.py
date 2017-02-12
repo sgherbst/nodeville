@@ -15,15 +15,15 @@ def main():
 
 	c = Circuit()
 
-	n1 = c.node('n1')
-	n2 = c.node('n2')
+	n1 = c.add(Node('n1', cap=1e-6))
+	n2 = c.add(Node('n2'))
 	gnd = GndNode()
 
 	V1 = c.add(VoltSource(n1, gnd, 2.0))
 	R1 = c.add(Resistor(n1, n2, 1e3))
 	R2 = c.add(Resistor(n2, gnd, 1e3))
 
-	c.run(20e-9)
+	c.run(75e-9)
 	c.plot(c.nodes)
 	c.plot_step()
 
@@ -38,19 +38,21 @@ class Circuit(object):
 
 		# simulation parameters
 
-		self.dt_def = 1e-12
+		self.dt_def_subdiv = 100
 		self.dt_min = 1e-18
 
+		self.dt_safety_factor = 0.9
 		self.dt_grow_max = 2.0
 		self.dt_shrink_min = 0.3
 
-	def node(self, name):
-		self.nodes.append(Node(name))
-		return self.nodes[-1]
-
-	def add(self, device):
-		self.devices.append(device)
-		return device
+	def add(self, thing):
+		if isinstance(thing, Device):
+			self.devices.append(thing)
+		elif isinstance(thing, Node):
+			self.nodes.append(thing)
+		else:
+			raise Exception('Trying to add object of unknown type to circuit.')
+		return thing
 
 	def run(self, tstop):
 		# time and voltage storage
@@ -64,34 +66,58 @@ class Circuit(object):
 
 		# initialize loop variables
 		t = 0
-		dt = self.dt_def
+		dt = float(tstop)/self.dt_def_subdiv
 
 		while t<tstop:
 
-			# start time step for nodes and devices
-			for node in self.nodes:
-				node.clear()
+			# three time steps
+			# n=0: full step
+			# n=1: rewind, half-step
+			# n=2: half-step
+			for n in range(3):
+				if n==0:
+					t_iter = t
+					dt_iter = dt
+				elif n==1:
+					t_iter = t
+					dt_iter = 0.5*dt
+				else:
+					t_iter = t+0.5*dt
+					dt_iter = 0.5*dt
 
-			# update device currents
-			for device in self.devices:
-				device.update(t, dt)
-
-			# update node voltages
-			for node in self.nodes:
-				node.update(dt)
+				for node in self.nodes:
+					node.clear(n)
+				# update device currents
+				for device in self.devices:
+					device.update(t_iter, dt_iter)
+				# update node voltages
+				for node in self.nodes:
+					node.update(n, dt_iter)
 			
-			# accept the timestep
+			# check if timestep is OK
+			min_ratio = float('inf')
+			for node in self.nodes:
+				min_ratio = min(node.get_error_ratio(), min_ratio)
+			if min_ratio < 1.0:
+				dt = dt*self.dt_safety_factor*max(min_ratio, self.dt_shrink_min)
+				if dt >= self.dt_min:
+					continue
+				else:
+					raise Exception('Timestep too small.')
+
+			# if it is then accept the timestep
 			for device in self.devices:
 				device.accept(t, dt)
 			for node in self.nodes:
 				node.accept()
 
-			# update timestep
+			# update time
 			t = t+dt
 			self.t_vec.append(t)
 
-			# store dt and iteration count for debugging purposes
+			# update timestep
 			self.dt_vec.append(dt)
+			dt = dt*self.dt_safety_factor*min(min_ratio, self.dt_grow_max)
 
 			# then save all the node voltages
 			for node in self.nodes:
@@ -137,28 +163,52 @@ class GndNode(object):
 		pass
 
 class Node(object):
-	def __init__(self, name, cap=1e-12):
+	def __init__(self, name, cap=1e-12, vtol=1e-3):
 		# store settings
 		self.name = name
 		self.cap = cap
+		self.vtol = vtol
 
 		# initialize voltages
 		self.volt = 0
 		self.nextVolt = 0
 
-	def clear(self):
-		self.curr = 0.0
+	def clear(self, n):
+		if n==0:
+			self.nextVolt = self.volt
+			self.curr = 0.0
+		elif n==1:
+			self.nextVolt = self.volt
+			self.curr = 0.0
+		else:
+			self.curr = 0.0
 
 	def add(self, value):
 		self.curr = self.curr + value
 
-	def update(self, dt):
-		self.nextVolt = self.volt + self.curr*dt/self.cap
+	def update(self, n, dt):
+		if n==0:
+			self.nextVolt = self.volt + self.curr*dt/self.cap
+			self.y0 = self.nextVolt
+		elif n==1:
+			self.nextVolt = self.volt + self.curr*dt/self.cap
+		else:
+			self.nextVolt = self.nextVolt + self.curr*dt/self.cap
+			self.y1 = self.nextVolt
+
+	def get_error_ratio(self):
+		if self.y1 == self.y0:
+			return float('inf')
+		else:
+			return self.vtol/abs(self.y1-self.y0)
 
 	def accept(self):
-		self.volt = self.nextVolt
+		self.volt = 2*self.y1 - self.y0
 
-class TwoTerm(object):
+class Device(object):
+	pass
+
+class TwoTerm(Device):
 	def __init__(self, p, n):
 		self.p = p
 		self.n = n
@@ -204,7 +254,7 @@ class Inductor(TwoTerm):
 		return self.iPrev + (1.0/self.ind)*self.get_volt()*dt
 
 class VoltSource(TwoTerm):
-	def __init__(self, p, n, volt=1.0, res=1, tr=10e-9):
+	def __init__(self, p, n, volt=1.0, res=10e-3, tr=10e-9):
 		self.volt = volt
 		self.res = res
 		self.tr = tr
