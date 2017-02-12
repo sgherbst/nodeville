@@ -8,6 +8,8 @@
 import numpy as np
 import math
 import matplotlib.pyplot as plt
+import random
+import numpy as np
 
 def main():
 
@@ -15,26 +17,15 @@ def main():
 
 	n1 = c.node('n1')
 	n2 = c.node('n2')
-	n3 = c.node('n3')
 	gnd = GndNode()
 
-	V1 = c.add(VoltSource(n1, gnd, 1.5))
+	V1 = c.add(VoltSource(n1, gnd, 2.0))
+	R1 = c.add(Resistor(n1, n2, 1e3))
+	R2 = c.add(Resistor(n2, gnd, 1e3))
 
-	L1 = c.add(Inductor(n1, n2, 10e-6))
-
-	R1 = c.add(Resistor(n2, n3, 600))
-	R2 = c.add(Resistor(n3, gnd, 600))
-
-	D1 = c.add(Diode(n3, gnd))
-
-	C1 = c.add(Capacitor(n1, gnd, 10e-12))
-	C2 = c.add(Capacitor(n2, gnd, 1e-9))
-	C3 = c.add(Capacitor(n3, gnd, 10e-12))
-
-	c.run(2e-6)
+	c.run(20e-9)
 	c.plot(c.nodes)
-	# c.plot_step()
-	# c.plot_it()
+	c.plot_step()
 
 	# show all plots
 	plt.show()
@@ -49,12 +40,9 @@ class Circuit(object):
 
 		self.dt_def = 1e-12
 		self.dt_min = 1e-18
-		self.dt_max = 1
 
-		self.dt_shrink_factor = 0.5
-		self. dt_grow_factor = 1.01
-
-		self.it_max = 100
+		self.dt_grow_max = 2.0
+		self.dt_shrink_min = 0.3
 
 	def node(self, name):
 		self.nodes.append(Node(name))
@@ -72,7 +60,6 @@ class Circuit(object):
 			self.volt_vec[node.name] = []
 
 		# keep track of loop parameters for debugging purposes
-		self.it_vec = []
 		self.dt_vec = [] 
 
 		# initialize loop variables
@@ -80,61 +67,31 @@ class Circuit(object):
 		dt = self.dt_def
 
 		while t<tstop:
-			it = 0
 
 			# start time step for nodes and devices
 			for node in self.nodes:
-				node.start_step()
+				node.clear()
 
-			# iteratively solve nodes at this timestep
-			while it<self.it_max:
-
-				# start iteration for nodes and devices
-				for node in self.nodes:
-					node.start_iter()
-
-				flag = False
-
-				# device will raise a flag if currents exceed a certain amount
-				# or changes more than a certain amount
-				for device in self.devices:
-					device.update(dt)
-					flag = flag or device.flag(dt)
-
-				# node will raise a flag if voltage change exceeds allowed range
-				# or if the current error exceeds allowed range
-				for node in self.nodes:
-					node.update(dt)
-					flag = flag or node.flag(dt)
-
-				# if no flags were raised, break out of the loop
-				if not flag:
-					break
-				else:
-					it=it+1
-			
-			# if there's a flag on exit, reduce the timestep and try again
-			if flag:
-				dt = dt*self.dt_shrink_factor
-				if dt < self.dt_min:
-					raise Exception('Timestep too small.')
-				else:
-					continue
-			
-			# otherwise accept the timestep
-			for node in self.nodes:
-				node.end_step(dt)
+			# update device currents
 			for device in self.devices:
-				device.end_step(dt)
+				device.update(t, dt)
+
+			# update node voltages
+			for node in self.nodes:
+				node.update(dt)
+			
+			# accept the timestep
+			for device in self.devices:
+				device.accept(t, dt)
+			for node in self.nodes:
+				node.accept()
 
 			# update timestep
-			self.t_vec.append(t)
 			t = t+dt
-			dt = min(dt*self.dt_grow_factor, self.dt_max)
+			self.t_vec.append(t)
 
 			# store dt and iteration count for debugging purposes
 			self.dt_vec.append(dt)
-			self.it_vec.append(it)
 
 			# then save all the node voltages
 			for node in self.nodes:
@@ -144,7 +101,6 @@ class Circuit(object):
 		print len(self.t_vec)
 		self.t_vec = np.asarray(self.t_vec)
 		self.dt_vec = np.asarray(self.dt_vec)
-		self.it_vec = np.asarray(self.it_vec)
 		for node in self.nodes:
 			self.volt_vec[node.name] = np.asarray(self.volt_vec[node.name])
 
@@ -165,21 +121,10 @@ class Circuit(object):
 		fig1 = plt.figure()
 		ax1 = fig1.add_subplot(111)
 
-		ax1.plot(self.tvec, self.svec, '-r', label='dt')
+		ax1.step(self.t_vec, self.dt_vec, '-r', label='dt')
 
 		ax1.set_xlabel('Time (s)')
 		ax1.set_ylabel('Timestep (s)')
-		ax1.set_title('Transient simulation')
-		ax1.legend(loc='lower right')
-
-	def plot_it(self):
-		fig1 = plt.figure()
-		ax1 = fig1.add_subplot(111)
-
-		ax1.plot(self.tvec, self.ivec, '-r', label='it')
-
-		ax1.set_xlabel('Time (s)')
-		ax1.set_ylabel('Iter count')
 		ax1.set_title('Transient simulation')
 		ax1.legend(loc='lower right')
 
@@ -192,117 +137,86 @@ class GndNode(object):
 		pass
 
 class Node(object):
-	def __init__(self, name, maxDelta=10e-3, maxErr=1e-7):
+	def __init__(self, name, cap=1e-12):
+		# store settings
 		self.name = name
-		self.maxDelta = maxDelta
-		self.maxErr = maxErr
+		self.cap = cap
+
+		# initialize voltages
 		self.volt = 0
 		self.nextVolt = 0
 
-	def start_step(self):
-		self.vmin = self.volt-self.maxDelta
-		self.vmax = self.volt+self.maxDelta
-		self.nextVolt = self.vmin
-		self.count = 0
-
-	def start_iter(self):
-		self.curr = 0
+	def clear(self):
+		self.curr = 0.0
 
 	def add(self, value):
 		self.curr = self.curr + value
 
 	def update(self, dt):
-		# first check current at max and min points
-		# then do a binary search in between
-		if self.count==0:
-			self.i_vmin = self.curr
-			self.nextVolt = self.vmax
-			self.count = self.count + 1
-			return
-		elif self.count==1:
-			self.i_vmax = self.curr
-		else:
-			if self.i_vmin < self.i_vmax:
-				if self.curr < 0:
-					self.i_vmin = self.curr
-					self.vmin = self.nextVolt
-				else:
-					self.i_vmax = self.curr
-					self.vmax = self.nextVolt
-			else:
-				if self.curr < 0:
-					self.i_vmax = self.curr
-					self.vmax = self.nextVolt
-				else:
-					self.i_vmin = self.curr
-					self.vmin = self.nextVolt
-		
-		# Next search point in between min and max values
-		self.nextVolt = 0.5*(self.vmin+self.vmax)
-		self.count = self.count + 1
+		self.nextVolt = self.volt + self.curr*dt/self.cap
 
-	def flag(self, dt):
-		return abs(self.curr) > self.maxErr
-
-	def end_step(self, dt):
+	def accept(self):
 		self.volt = self.nextVolt
 
 class TwoTerm(object):
-	def __init__(self, p, n, iMax=10):
+	def __init__(self, p, n):
 		self.p = p
 		self.n = n
+
 		self.vPrev = 0.0
 		self.iPrev = 0.0
-		self.iMax = iMax
 
-	def calc_volt(self, dt):
+	def get_volt(self):
 		return float(self.p.nextVolt-self.n.nextVolt)
 
-	def update(self, dt):
-		curr = self.calc_curr(dt)
+	def update(self, t, dt):
+		curr = self.calc_curr(t, dt)
 
 		self.p.add(-curr)
 		self.n.add(curr)
 
-	def end_step(self, dt):
-		self.vPrev = self.calc_volt(dt)
-		self.iPrev = self.calc_curr(dt)
-
-	def flag(self, dt):
-		return abs(self.calc_curr(dt))>self.iMax
+	def accept(self, t, dt):
+		self.vPrev = self.get_volt()
+		self.iPrev = self.calc_curr(t, dt)
 
 class Resistor(TwoTerm):
 	def __init__(self, p, n, res=1e3):
 		self.res = res
 		super(Resistor, self).__init__(p,n)
 
-	def calc_curr(self, dt):
-		return self.calc_volt(dt)/self.res
+	def calc_curr(self, t, dt):
+		return self.get_volt()/self.res
 
 class Capacitor(TwoTerm):
 	def __init__(self, p, n, cap=1e-9):
 		self.cap = cap
 		super(Capacitor, self).__init__(p,n)
 
-	def calc_curr(self, dt):
-		return self.cap*(self.calc_volt(dt)-self.vPrev)/dt
+	def calc_curr(self, t, dt):
+		return self.cap*(self.get_volt()-self.vPrev)/dt
 
 class Inductor(TwoTerm):
 	def __init__(self, p, n, ind=100e-9):
 		self.ind = ind
 		super(Inductor, self).__init__(p,n)
 
-	def calc_curr(self, dt):
-		return self.iPrev + (1.0/self.ind)*self.calc_volt(dt)*dt
+	def calc_curr(self, t, dt):
+		return self.iPrev + (1.0/self.ind)*self.get_volt()*dt
 
 class VoltSource(TwoTerm):
-	def __init__(self, p, n, volt=1.0, res=1):
+	def __init__(self, p, n, volt=1.0, res=1, tr=10e-9):
 		self.volt = volt
 		self.res = res
+		self.tr = tr
 		super(VoltSource, self).__init__(p,n)
 
-	def calc_curr(self, dt):
-		return float(self.calc_volt(dt)-self.volt)/self.res
+	def calc_curr(self, t, dt):
+		if t <= self.tr:
+			vset = float(t)/self.tr * self.volt
+		else:
+			vset = self.volt
+
+		return float(self.get_volt()-vset)/self.res
 
 class Diode(TwoTerm):
 	def __init__(self, p, n, Is=1e-15, Vlin=0.85, Vth=0.025):
@@ -327,9 +241,9 @@ class Diode(TwoTerm):
 		self.Ilin = self.raw_current(self.Vlin)
 		self.Glin = self.Ilin/self.Vlin
 
-	def calc_curr(self, dt):
+	def calc_curr(self, t, dt):
 		# Implement limited exponential behavior
-		volt = self.calc_volt(dt)
+		volt = self.get_volt()
 		if volt >= self.Vlin:
 			return self.Ilin + (volt-self.Vlin)*self.Glin
 		else:
